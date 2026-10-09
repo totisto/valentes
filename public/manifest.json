@@ -1,0 +1,33 @@
+{
+  "id": "/",
+  "name": "Ranking dos Valentes",
+  "short_name": "Valentes",
+  "description": "Aplicativo de acompanhamento de pontuação e rankings diários do grupo Valentes.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#060D17",
+  "theme_color": "#0B192C",
+  "categories": ["education", "sports", "productivity"],
+  "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-512-maskable.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}

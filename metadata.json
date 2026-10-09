@@ -1,0 +1,6 @@
+{
+  "name": "Ranking dos Valentes",
+  "description": "Aplicativo oficial de pontuação e rankings diário, semanal, mensal e anual para o grupo Valentes.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

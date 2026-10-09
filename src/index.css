@@ -1,0 +1,31 @@
+@import "tailwindcss";
+
+@layer utilities {
+  .pb-safe {
+    padding-bottom: env(safe-area-inset-bottom, 1rem);
+  }
+}
+
+/* Custom scrollbar for dense student grids on mobile */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+::-webkit-scrollbar-track {
+  background: #060D17;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #1D4ED8;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #F59E0B;
+}
+
+/* Mobile tap highlights */
+* {
+  -webkit-tap-highlight-color: transparent;
+}

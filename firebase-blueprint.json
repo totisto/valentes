@@ -1,0 +1,104 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile representing a teacher, administrator, or student account",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique user ID (auth UID)" },
+        "name": { "type": "string", "maxLength": 100, "description": "Full name" },
+        "email": { "type": "string", "format": "email", "maxLength": 150, "description": "Email address" },
+        "role": { "type": "string", "enum": ["admin", "teacher", "student"], "description": "User authorization role" },
+        "studentId": { "type": "string", "description": "Reference to canonical student record" },
+        "active": { "type": "boolean", "description": "Account activation status" },
+        "createdAt": { "type": "string", "description": "Creation ISO timestamp" },
+        "updatedAt": { "type": "string", "description": "Update ISO timestamp" }
+      },
+      "required": ["id", "name", "email", "role", "active", "createdAt", "updatedAt"]
+    },
+    "Student": {
+      "title": "Student",
+      "description": "Student in the Valentes group",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Student ID" },
+        "name": { "type": "string", "maxLength": 80, "description": "Student name" },
+        "email": { "type": "string", "format": "email", "description": "Optional email" },
+        "authUid": { "type": "string", "description": "Link to authenticated user UID" },
+        "active": { "type": "boolean", "description": "Whether student is active in rankings" },
+        "createdAt": { "type": "string", "description": "Creation timestamp" },
+        "updatedAt": { "type": "string", "description": "Update timestamp" }
+      },
+      "required": ["id", "name", "active", "createdAt", "updatedAt"]
+    },
+    "ScoreEntry": {
+      "title": "ScoreEntry",
+      "description": "Individual score entry assigned by a teacher to a student",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique score entry ID" },
+        "studentId": { "type": "string", "description": "Student ID reference" },
+        "studentName": { "type": "string", "maxLength": 80, "description": "Denormalized student name" },
+        "points": { "type": "number", "description": "Points awarded" },
+        "categoryId": { "type": "string", "description": "Category ID reference" },
+        "categoryName": { "type": "string", "maxLength": 60, "description": "Denormalized category name" },
+        "teacherId": { "type": "string", "description": "Teacher UID reference" },
+        "teacherName": { "type": "string", "maxLength": 100, "description": "Denormalized teacher name" },
+        "date": { "type": "string", "description": "Date YYYY-MM-DD" },
+        "week": { "type": "string", "description": "Week label e.g. Semana 41" },
+        "month": { "type": "string", "description": "Month string YYYY-MM" },
+        "year": { "type": "number", "description": "Calendar year" },
+        "createdAt": { "type": "string", "description": "Timestamp created" },
+        "updatedAt": { "type": "string", "description": "Timestamp updated" }
+      },
+      "required": ["id", "studentId", "studentName", "points", "categoryId", "categoryName", "teacherId", "teacherName", "date", "week", "month", "year", "createdAt", "updatedAt"]
+    },
+    "Category": {
+      "title": "Category",
+      "description": "Score category e.g. Presença, Participação",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Category identifier" },
+        "name": { "type": "string", "maxLength": 60, "description": "Category display name" },
+        "description": { "type": "string", "maxLength": 200, "description": "Optional category description" },
+        "active": { "type": "boolean", "description": "Active status" },
+        "createdAt": { "type": "string", "description": "Creation timestamp" }
+      },
+      "required": ["id", "name", "active", "createdAt"]
+    },
+    "Setting": {
+      "title": "Setting",
+      "description": "System configuration",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Settings key or ID" },
+        "appName": { "type": "string", "maxLength": 100, "description": "Application display name" },
+        "season": { "type": "string", "maxLength": 50, "description": "Current season or year" },
+        "updatedAt": { "type": "string", "description": "Update timestamp" }
+      },
+      "required": ["id", "appName", "season", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/User" },
+      "description": "Teacher and administrator user profiles"
+    },
+    "/students/{studentId}": {
+      "schema": { "$ref": "#/entities/Student" },
+      "description": "21 adolescents of the Valentes group"
+    },
+    "/scoreEntries/{entryId}": {
+      "schema": { "$ref": "#/entities/ScoreEntry" },
+      "description": "Recorded point awards made by teachers"
+    },
+    "/categories/{categoryId}": {
+      "schema": { "$ref": "#/entities/Category" },
+      "description": "Evaluation categories"
+    },
+    "/settings/{settingId}": {
+      "schema": { "$ref": "#/entities/Setting" },
+      "description": "App settings"
+    }
+  }
+}

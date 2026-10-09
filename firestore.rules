@@ -1,0 +1,158 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Funções Auxiliares de Autenticação e Permissão
+    // ===============================================================
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // Validação de formato de ID
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128;
+    }
+
+    // Administrador Principal Exclusivo: lucasj6k@gmail.com
+    function isAdmin() {
+      return isSignedIn() && (
+        request.auth.token.email == 'lucasj6k@gmail.com' ||
+        (
+          exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.email == 'lucasj6k@gmail.com' &&
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'
+        )
+      );
+    }
+
+    // Professor autenticado com perfil ativo no sistema
+    function isTeacher() {
+      return isSignedIn() && (
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        (
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'teacher' ||
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'coordenador'
+        )
+      );
+    }
+
+    // Professor ou Administrador
+    function isTeacherOrAdmin() {
+      return isAdmin() || isTeacher();
+    }
+
+    // Regra padrão de bloqueio
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // ===============================================================
+    // 1. PONTUAÇÕES (scoreEntries)
+    // - Leitura: Disponível a usuários autenticados (alunos, professores, admin).
+    // - Escrita: EXCLUSIVA para Professores e Administradores (alunos não podem alterar pontos).
+    // - Exclusão: Professores e Administrador.
+    // ===============================================================
+    match /scoreEntries/{entryId} {
+      allow read: if isSignedIn();
+
+      allow create: if isTeacherOrAdmin() &&
+        isValidId(entryId) &&
+        request.resource.data.points is number &&
+        request.resource.data.studentId is string &&
+        request.resource.data.teacherId is string;
+
+      allow update: if isTeacherOrAdmin() &&
+        isValidId(entryId) &&
+        request.resource.data.points is number;
+
+      allow delete: if isTeacherOrAdmin() &&
+        isValidId(entryId);
+    }
+
+    // ===============================================================
+    // 2. USUÁRIOS (users)
+    // - Usuários não autenticados NÃO podem ler perfis.
+    // - Alunos autenticados podem ler SOMENTE seus próprios dados (request.auth.uid == userId).
+    // - Professores e Administrador podem consultar os perfis para gestão e listagem.
+    // - Nenhuma senha pode ser gravada na coleção.
+    // ===============================================================
+    match /users/{userId} {
+      allow read: if isSignedIn() && (request.auth.uid == userId || isTeacherOrAdmin());
+
+      // Criação de perfil:
+      // - Aluno cria apenas o próprio perfil com role 'student' e sem campos de senha.
+      // - Administrador pode criar qualquer perfil (incluindo novos professores).
+      allow create: if isSignedIn() && (
+        (
+          request.auth.uid == userId &&
+          request.resource.data.role == 'student' &&
+          !request.resource.data.keys().hasAny(['initialPassword', 'password'])
+        ) ||
+        isAdmin()
+      );
+
+      // Atualização de perfil:
+      // - Usuário comum só pode atualizar seus dados pessoais, NUNCA os campos 'role', 'email' ou senhas.
+      // - Somente o Administrador Principal pode alterar roles, status e dados de professores.
+      allow update: if isSignedIn() && (
+        (
+          request.auth.uid == userId &&
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role', 'email', 'initialPassword', 'password'])
+        ) ||
+        isAdmin()
+      );
+
+      // Exclusão de contas: EXCLUSIVO do Administrador
+      allow delete: if isAdmin();
+    }
+
+    // ===============================================================
+    // 3. ALUNOS (students)
+    // - Leitura disponível a usuários autenticados para exibição nos rankings e listas.
+    // - Professores e Admin podem gerenciar alunos; Aluno pode auto-cadastrar seu registro.
+    // - Exclusão de alunos: EXCLUSIVO do Administrador.
+    // ===============================================================
+    match /students/{studentId} {
+      allow read: if isSignedIn();
+
+      allow create: if isSignedIn() && (
+        isTeacherOrAdmin() ||
+        request.auth.uid == studentId
+      );
+
+      allow update: if isSignedIn() && (
+        isTeacherOrAdmin() ||
+        (
+          request.auth.uid == studentId &&
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny(['active'])
+        )
+      );
+
+      allow delete: if isAdmin();
+    }
+
+    // ===============================================================
+    // 4. CATEGORIAS DE AVALIAÇÃO (categories)
+    // - Leitura para compor formulários e relatórios para usuários autenticados.
+    // - Criação e edição: Professores e Administrador.
+    // - Exclusão de categorias: EXCLUSIVO do Administrador.
+    // ===============================================================
+    match /categories/{categoryId} {
+      allow read: if isSignedIn();
+      allow create, update: if isTeacherOrAdmin() && isValidId(categoryId);
+      allow delete: if isAdmin() && isValidId(categoryId);
+    }
+
+    // ===============================================================
+    // 5. CONFIGURAÇÕES DO SISTEMA (settings)
+    // - Leitura para usuários autenticados.
+    // - Alteração e controle: EXCLUSIVO do Administrador (lucasj6k@gmail.com).
+    // ===============================================================
+    match /settings/{settingId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin() && isValidId(settingId);
+    }
+  }
+}
