@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
 import {
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
@@ -6,6 +6,8 @@ import {
   onAuthStateChanged,
   sendPasswordResetEmail,
   signInWithPopup,
+  signInWithRedirect,
+  getRedirectResult,
   GoogleAuthProvider,
   User as FirebaseUser,
   updateProfile
@@ -15,9 +17,11 @@ import {
   db,
   authPersistencePromise,
   verifyUserRoleAndPermissions,
-  UserAuthPermission
+  UserAuthPermission,
+  activePersistenceType,
+  persistenceWarning
 } from '../firebase/config';
-import { doc, setDoc } from 'firebase/firestore';
+import { doc, setDoc, getDocs, collection } from 'firebase/firestore';
 import { getUserProfile, upsertUserProfile, linkStudentToUser } from '../services/userService';
 import {
   findMatchForAccount,
@@ -33,10 +37,12 @@ interface AuthContextType {
   isAdmin: boolean;
   isTeacher: boolean;
   isStudent: boolean;
+  isPendingStudentLink: boolean;
   isLoading: boolean;
   authError: string | null;
   defaultDashboardTab: 'admin' | 'dashboard' | 'minhas-notas';
   verifyPermissionsNow: () => Promise<UserAuthPermission | null>;
+  refreshUserProfile: () => Promise<UserProfile | null>;
   loginWithEmail: (email: string, pass: string) => Promise<boolean>;
   loginWithGoogle: () => Promise<boolean>;
   registerStudentAccount: (name: string, email: string, pass: string) => Promise<boolean>;
@@ -48,147 +54,172 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+// Helper to detect iOS / Safari / mobile devices where popups fail or are blocked
+const isMobileOrIOS = (): boolean => {
+  if (typeof window === 'undefined' || typeof navigator === 'undefined') return false;
+  const ua = navigator.userAgent || '';
+  const isIOS =
+    /iPad|iPhone|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua);
+  return isIOS || isMobile;
+};
+
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [currentUser, setCurrentUser] = useState<FirebaseUser | null>(null);
-  // Do NOT initialize from localStorage to prevent spoofing or stale cross-account access
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [defaultDashboardTab, setDefaultDashboardTab] = useState<'admin' | 'dashboard' | 'minhas-notas'>('dashboard');
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [authError, setAuthError] = useState<string | null>(null);
 
-  // Runtime permissions check
-  const verifyPermissionsNow = async (): Promise<UserAuthPermission | null> => {
-    if (!currentUser) return null;
-    try {
-      const permissions = await verifyUserRoleAndPermissions(currentUser);
-      setDefaultDashboardTab(permissions.defaultDashboardTab);
-      return permissions;
-    } catch (err) {
-      console.warn('Erro ao verificar permissões:', err);
-      return null;
-    }
-  };
+  // Counter and Ref to prevent async race condition when identity changes (Point 4)
+  const currentAuthUidRef = useRef<string | null>(null);
+  const authReqCounterRef = useRef<number>(0);
 
-  // Firebase Auth listener with guaranteed persistence resolution and canonical student linkage
+  // Handle redirect result for iPhone / Safari / mobile browser on startup
+  useEffect(() => {
+    let isMounted = true;
+    getRedirectResult(auth)
+      .then(async (result) => {
+        if (!isMounted || !result?.user) return;
+        try {
+          const perms = await verifyUserRoleAndPermissions(result.user);
+          if (isMounted) {
+            setDefaultDashboardTab(perms.defaultDashboardTab);
+          }
+        } catch (err) {
+          console.warn('Redirect permissions check note:', err);
+        }
+      })
+      .catch((err: any) => {
+        if (!isMounted) return;
+        if (err.code !== 'auth/popup-closed-by-user') {
+          console.warn('getRedirectResult notice:', err);
+          if (err.code === 'auth/unauthorized-domain') {
+            setAuthError('Domínio não autorizado no Firebase Console. Adicione este domínio aos Domínios Autorizados no Firebase Authentication.');
+          } else {
+            setAuthError(err.message || 'Erro ao processar retorno da autenticação.');
+          }
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  // Main Auth state observer with race-condition protection (Point 4)
   useEffect(() => {
     let isMounted = true;
 
     const initAuth = async () => {
-      // Ensure browserLocalPersistence is ready before observing state
       try {
         await authPersistencePromise;
       } catch (err) {
-        console.warn('Persistence setup warning:', err);
+        console.warn('Persistence promise note:', err);
       }
 
       const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
         if (!isMounted) return;
 
-        if (fbUser) {
-          try {
-            // 1. Verify claims and role in Firestore
-            const permissions = await verifyUserRoleAndPermissions(fbUser);
-            if (isMounted) {
-              setDefaultDashboardTab(permissions.defaultDashboardTab);
-            }
+        const reqId = ++authReqCounterRef.current;
 
-            // 2. Fetch user profile from Firestore /users/{uid}
-            let profile = await getUserProfile(fbUser.uid);
+        // 1. Clear previous profile immediately from memory
+        setUserProfile(null);
 
-            if (profile) {
-              // Ensure role matches verified permissions
-              if (profile.role !== permissions.role) {
-                profile.role = permissions.role as any;
-                await upsertUserProfile(profile);
-              }
-
-              // 3. For students, resolve canonical studentId link if not already set
-              if (profile.role === 'student' && !profile.studentId) {
-                const matchedStudent = await findMatchForAccount(
-                  fbUser.email || profile.email,
-                  profile.name
-                );
-
-                if (matchedStudent) {
-                  profile.studentId = matchedStudent.id;
-                  await upsertUserProfile(profile);
-                  await linkStudentAuthUid(matchedStudent.id, fbUser.uid);
-                }
-              }
-
-              if (isMounted) {
-                setUserProfile(profile);
-                setCurrentUser(fbUser);
-              }
-            } else {
-              // Create initial profile in Firestore
-              let canonicalStudentId: string | undefined = undefined;
-
-              if (permissions.role === 'student') {
-                const matchedStudent = await findMatchForAccount(
-                  fbUser.email || '',
-                  fbUser.displayName || ''
-                );
-
-                if (matchedStudent) {
-                  canonicalStudentId = matchedStudent.id;
-                  await linkStudentAuthUid(matchedStudent.id, fbUser.uid);
-                } else {
-                  // Create new official student record for this new user
-                  const newStudentDocId = fbUser.uid;
-                  await setDoc(
-                    doc(db, 'students', newStudentDocId),
-                    {
-                      id: newStudentDocId,
-                      name: fbUser.displayName || fbUser.email?.split('@')[0] || 'Aluno',
-                      email: fbUser.email?.toLowerCase() || '',
-                      authUid: fbUser.uid,
-                      active: true,
-                      avatarSeed: (fbUser.displayName || 'aluno').toLowerCase(),
-                      createdAt: new Date().toISOString(),
-                      updatedAt: new Date().toISOString()
-                    },
-                    { merge: true }
-                  );
-                  canonicalStudentId = newStudentDocId;
-                }
-              }
-
-              const newProfile: UserProfile = {
-                id: fbUser.uid,
-                name: fbUser.displayName || fbUser.email?.split('@')[0] || 'Usuário',
-                email: fbUser.email?.toLowerCase() || '',
-                role: permissions.role as any,
-                studentId: canonicalStudentId,
-                active: true,
-                avatarSeed: (fbUser.displayName || fbUser.email || 'user').toLowerCase(),
-                createdAt: new Date().toISOString(),
-                updatedAt: new Date().toISOString(),
-                lastLogin: new Date().toLocaleString('pt-BR')
-              };
-
-              await upsertUserProfile(newProfile);
-              if (isMounted) {
-                setUserProfile(newProfile);
-                setCurrentUser(fbUser);
-              }
-            }
-          } catch (e) {
-            console.warn('Erro na resolução do perfil autenticado:', e);
-            if (isMounted) {
-              setCurrentUser(fbUser);
-            }
-          }
-        } else {
-          if (isMounted) {
-            setCurrentUser(null);
-            setUserProfile(null);
-            setDefaultDashboardTab('dashboard');
-          }
+        if (!fbUser) {
+          currentAuthUidRef.current = null;
+          setCurrentUser(null);
+          setDefaultDashboardTab('dashboard');
+          setIsLoading(false);
+          return;
         }
 
-        if (isMounted) {
-          setIsLoading(false);
+        // Set current UID tracking
+        currentAuthUidRef.current = fbUser.uid;
+        setCurrentUser(fbUser);
+
+        try {
+          // 2 & 3. Verify permissions and consult user profile by current UID
+          const permissions = await verifyUserRoleAndPermissions(fbUser);
+
+          // Discard if another auth change was triggered in the meantime
+          if (reqId !== authReqCounterRef.current || currentAuthUidRef.current !== fbUser.uid) {
+            return;
+          }
+
+          if (isMounted) {
+            setDefaultDashboardTab(permissions.defaultDashboardTab);
+          }
+
+          let profile = await getUserProfile(fbUser.uid);
+
+          // Discard if identity changed while awaiting getUserProfile
+          if (reqId !== authReqCounterRef.current || currentAuthUidRef.current !== fbUser.uid) {
+            return;
+          }
+
+          if (profile) {
+            // Synchronize role if claims or permissions differ
+            if (profile.role !== permissions.role) {
+              profile.role = permissions.role as any;
+              await upsertUserProfile(profile);
+            }
+
+            // Check if student has exact verified email match with unlinked student
+            if (profile.role === 'student' && !profile.studentId && fbUser.email) {
+              const matchedStudent = await findMatchForAccount(fbUser.email, fbUser.uid);
+              if (matchedStudent) {
+                // If unambiguous match by verified email, save link
+                profile.studentId = matchedStudent.id;
+                await upsertUserProfile(profile);
+              }
+            }
+          } else {
+            // Initial profile creation in Firestore
+            let matchedStudentId: string | undefined = undefined;
+
+            if (permissions.role === 'student' && fbUser.email) {
+              const matched = await findMatchForAccount(fbUser.email, fbUser.uid);
+              if (matched) {
+                matchedStudentId = matched.id;
+              }
+            }
+
+            const isLucasAdmin = fbUser.email?.toLowerCase().trim() === 'lucasj6k@gmail.com';
+            const newProfile: UserProfile = {
+              id: fbUser.uid,
+              name: fbUser.displayName || fbUser.email?.split('@')[0] || 'Usuário',
+              email: (fbUser.email || '').toLowerCase().trim(),
+              role: isLucasAdmin ? 'admin' : (permissions.role as any) || 'student',
+              studentId: matchedStudentId,
+              active: true,
+              avatarSeed: (fbUser.displayName || fbUser.email || 'user').toLowerCase(),
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+              lastLogin: new Date().toLocaleString('pt-BR')
+            };
+
+            await upsertUserProfile(newProfile);
+            profile = newProfile;
+          }
+
+          // 5. Final confirmation that the result STILL belongs to current authenticated UID
+          if (reqId !== authReqCounterRef.current || currentAuthUidRef.current !== fbUser.uid) {
+            return;
+          }
+
+          // 6. Only now publish the new profile to application state
+          if (isMounted) {
+            setUserProfile(profile);
+            setIsLoading(false);
+          }
+        } catch (e: any) {
+          console.warn('Erro na resolução do perfil autenticado:', e);
+          if (reqId === authReqCounterRef.current && isMounted) {
+            // Keep currentUser so we don't kick back to login without information
+            setCurrentUser(fbUser);
+            setIsLoading(false);
+          }
         }
       });
 
@@ -205,6 +236,32 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (unsubFn) unsubFn();
     };
   }, []);
+
+  // Allows manual re-check of profile (e.g. from StudentPendingLinkView)
+  const refreshUserProfile = async (): Promise<UserProfile | null> => {
+    if (!currentUser) return null;
+    try {
+      const p = await getUserProfile(currentUser.uid);
+      if (p && currentAuthUidRef.current === currentUser.uid) {
+        setUserProfile(p);
+      }
+      return p;
+    } catch {
+      return null;
+    }
+  };
+
+  const verifyPermissionsNow = async (): Promise<UserAuthPermission | null> => {
+    if (!currentUser) return null;
+    try {
+      const permissions = await verifyUserRoleAndPermissions(currentUser);
+      setDefaultDashboardTab(permissions.defaultDashboardTab);
+      return permissions;
+    } catch (err) {
+      console.warn('Erro ao verificar permissões:', err);
+      return null;
+    }
+  };
 
   const loginWithEmail = async (email: string, pass: string): Promise<boolean> => {
     setAuthError(null);
@@ -231,9 +288,64 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   /**
+   * Google Sign-In with iPhone / Safari redirect strategy (Point 5):
+   * - Uses basic authentication scopes only (no Gmail scopes)
+   * - Uses redirect on iOS Safari / mobile where popups fail
+   */
+  const loginWithGoogle = async (): Promise<boolean> => {
+    setAuthError(null);
+    try {
+      await authPersistencePromise;
+      const provider = new GoogleAuthProvider();
+      provider.setCustomParameters({ prompt: 'select_account' });
+
+      const isMobileDevice = isMobileOrIOS();
+      const isTopWindow = typeof window !== 'undefined' && window.self === window.top;
+
+      // On mobile / Safari top-level, prefer redirect to guarantee compatibility
+      if (isMobileDevice && isTopWindow) {
+        await signInWithRedirect(auth, provider);
+        return true;
+      }
+
+      // In desktop or iframe environments, attempt popup
+      try {
+        const result = await signInWithPopup(auth, provider);
+        if (result.user) {
+          const perms = await verifyUserRoleAndPermissions(result.user);
+          setDefaultDashboardTab(perms.defaultDashboardTab);
+        }
+        return true;
+      } catch (popupErr: any) {
+        if (
+          (popupErr.code === 'auth/popup-blocked' ||
+           popupErr.code === 'auth/popup-closed-by-user' ||
+           popupErr.code === 'auth/cancelled-popup-request') &&
+          isTopWindow
+        ) {
+          console.info('Popup bloqueado, utilizando signInWithRedirect para Safari/iPhone.');
+          await signInWithRedirect(auth, provider);
+          return true;
+        }
+        throw popupErr;
+      }
+    } catch (err: any) {
+      if (err.code !== 'auth/popup-closed-by-user') {
+        const msg =
+          err.code === 'auth/unauthorized-domain'
+            ? 'Domínio não autorizado no Firebase Console. Adicione este domínio em Autenticação > Configurações > Domínios Autorizados.'
+            : err.message || 'Erro ao autenticar com o Google.';
+        setAuthError(msg);
+      }
+      return false;
+    }
+  };
+
+  /**
    * Public Student Registration:
-   * Sets role strictly to 'student' and establishes unique link to canonical studentId.
-   * NEVER saves plain passwords in Firestore.
+   * Sets role strictly to 'student'. Does NOT set arbitrary studentId.
+   * If exact matching email is verified in students list, connects safely;
+   * otherwise leaves studentId undefined (pending admin verification).
    */
   const registerStudentAccount = async (
     name: string,
@@ -243,40 +355,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setAuthError(null);
     try {
       await authPersistencePromise;
-      const userCred = await createUserWithEmailAndPassword(auth, email.trim(), pass);
-      const user = userCred.user;
-
-      await updateProfile(user, { displayName: name.trim() });
-
-      // 1. Resolve canonical student: check unambiguous match in existing students
       const cleanEmail = email.trim().toLowerCase();
       const cleanName = name.trim();
-      const matched = await findMatchForAccount(cleanEmail, cleanName);
 
-      let canonicalStudentId: string;
-      if (matched) {
-        canonicalStudentId = matched.id;
-        await linkStudentAuthUid(matched.id, user.uid);
-      } else {
-        // Create official canonical student document
-        canonicalStudentId = user.uid;
-        await setDoc(
-          doc(db, 'students', canonicalStudentId),
-          {
-            id: canonicalStudentId,
-            name: cleanName,
-            email: cleanEmail,
-            authUid: user.uid,
-            active: true,
-            avatarSeed: cleanName.toLowerCase(),
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString()
-          },
-          { merge: true }
-        );
-      }
+      const userCred = await createUserWithEmailAndPassword(auth, cleanEmail, pass);
+      const user = userCred.user;
 
-      // 2. Save user profile in /users/{uid} with studentId reference (NO passwords saved)
+      await updateProfile(user, { displayName: cleanName });
+
+      // Check if there is an exact verified email match
+      const matched = await findMatchForAccount(cleanEmail, user.uid);
+      const canonicalStudentId = matched ? matched.id : undefined;
+
       const studentProfile: UserProfile = {
         id: user.uid,
         name: cleanName,
@@ -307,28 +397,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
-  /**
-   * Google Sign-In: uses only basic authentication scopes (email/profile).
-   * Separated strictly from external Gmail permissions per requirement 10.
-   */
-  const loginWithGoogle = async (): Promise<boolean> => {
-    setAuthError(null);
-    try {
-      await authPersistencePromise;
-      const provider = new GoogleAuthProvider();
-      // Only default basic auth scopes, NO Gmail scopes
-      const result = await signInWithPopup(auth, provider);
-      if (result.user) {
-        const perms = await verifyUserRoleAndPermissions(result.user);
-        setDefaultDashboardTab(perms.defaultDashboardTab);
-      }
-      return true;
-    } catch (err: any) {
-      setAuthError(err.message || 'Erro ao autenticar com o Google.');
-      return false;
-    }
-  };
-
   const resetPassword = async (email: string): Promise<boolean> => {
     try {
       await sendPasswordResetEmail(auth, email.trim());
@@ -340,6 +408,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const logout = async () => {
+    authReqCounterRef.current++;
+    currentAuthUidRef.current = null;
     setUserProfile(null);
     setCurrentUser(null);
     setDefaultDashboardTab('dashboard');
@@ -349,13 +419,48 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   /**
-   * Admin tool: links any student account to a canonical student ID
+   * Admin tool: links a student account to a canonical student ID (Point 2 & 3).
+   * Validates duplicate links, ensures authorized operation by lucasj6k@gmail.com.
    */
   const linkStudentAccount = async (targetUid: string, canonicalStudentId: string) => {
-    await linkStudentToUser(targetUid, canonicalStudentId);
-    await linkStudentAuthUid(canonicalStudentId, targetUid);
-    if (currentUser?.uid === targetUid && userProfile) {
-      setUserProfile({ ...userProfile, studentId: canonicalStudentId });
+    const isLucas =
+      currentUser?.email?.toLowerCase() === 'lucasj6k@gmail.com' ||
+      userProfile?.email?.toLowerCase() === 'lucasj6k@gmail.com' ||
+      userProfile?.role === 'admin';
+
+    if (!isLucas) {
+      throw new Error('Apenas o Administrador Principal autorizado pode vincular contas de alunos.');
+    }
+
+    const cleanUid = targetUid.trim();
+    const cleanStdId = canonicalStudentId.trim();
+
+    if (!cleanUid || !cleanStdId) {
+      throw new Error('UID e ID canônico do aluno são obrigatórios.');
+    }
+
+    // Check for duplicate linkage in users collection
+    const usersSnap = await getDocs(collection(db, 'users'));
+    let alreadyLinkedTo: UserProfile | null = null;
+    usersSnap.forEach((d) => {
+      const u = d.data() as UserProfile;
+      if (d.id !== cleanUid && u.studentId === cleanStdId) {
+        alreadyLinkedTo = { ...u, id: d.id };
+      }
+    });
+
+    if (alreadyLinkedTo) {
+      throw new Error(
+        `O aluno "${cleanStdId}" já está vinculado à conta de ${(alreadyLinkedTo as any).email || (alreadyLinkedTo as any).name}. Desfaça o vínculo anterior para evitar duplicidade.`
+      );
+    }
+
+    // Perform authorized updates
+    await linkStudentToUser(cleanUid, cleanStdId);
+    await linkStudentAuthUid(cleanStdId, cleanUid);
+
+    if (currentUser?.uid === cleanUid && userProfile) {
+      setUserProfile({ ...userProfile, studentId: cleanStdId });
     }
   };
 
@@ -371,7 +476,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const isTeacher =
     (userProfile?.role === 'teacher' || (!isAdmin && role === 'teacher')) && userProfile?.role !== 'student';
   const isStudent = role === 'student';
-  const studentId = userProfile?.studentId || (isStudent ? currentUser?.uid || null : null);
+  const studentId = userProfile?.studentId || null;
+  const isPendingStudentLink = isStudent && !studentId;
 
   return (
     <AuthContext.Provider
@@ -383,10 +489,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         isAdmin,
         isTeacher,
         isStudent,
+        isPendingStudentLink,
         isLoading,
         authError,
         defaultDashboardTab,
         verifyPermissionsNow,
+        refreshUserProfile,
         loginWithEmail,
         loginWithGoogle,
         registerStudentAccount,

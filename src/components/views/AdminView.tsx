@@ -71,7 +71,7 @@ export const AdminView: React.FC = () => {
   const [showAddTeacherModal, setShowAddTeacherModal] = useState(false);
   const [newTeacherName, setNewTeacherName] = useState('');
   const [newTeacherEmail, setNewTeacherEmail] = useState('');
-  const [newTeacherPassword, setNewTeacherPassword] = useState('valentes2026');
+  const [newTeacherPassword, setNewTeacherPassword] = useState('');
   const [isSavingTeacher, setIsSavingTeacher] = useState(false);
   const [teacherFeedback, setTeacherFeedback] = useState<string | null>(null);
 
@@ -120,18 +120,22 @@ export const AdminView: React.FC = () => {
   const handleCreateTeacher = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newTeacherName.trim() || !newTeacherEmail.trim()) return;
+    if (!newTeacherPassword.trim() || newTeacherPassword.trim().length < 6) {
+      alert('A senha inicial do professor deve ter no mínimo 6 caracteres.');
+      return;
+    }
     setIsSavingTeacher(true);
     setTeacherFeedback(null);
     try {
       await createTeacher({
         name: newTeacherName.trim(),
         email: newTeacherEmail.trim().toLowerCase(),
-        initialPassword: newTeacherPassword.trim() || 'valentes2026'
+        initialPassword: newTeacherPassword.trim()
       });
       setTeacherFeedback(`Professor(a) "${newTeacherName}" adicionado(a) com sucesso!`);
       setNewTeacherName('');
       setNewTeacherEmail('');
-      setNewTeacherPassword('valentes2026');
+      setNewTeacherPassword('');
       setShowAddTeacherModal(false);
       setTimeout(() => setTeacherFeedback(null), 4000);
     } catch (err: any) {
@@ -431,7 +435,7 @@ export const AdminView: React.FC = () => {
               onClick={() => {
                 setNewTeacherName('');
                 setNewTeacherEmail('');
-                setNewTeacherPassword('valentes2026');
+                setNewTeacherPassword('');
                 setShowAddTeacherModal(true);
               }}
               className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-amber-400 via-amber-500 to-amber-400 hover:from-amber-300 text-slate-950 font-black text-xs uppercase tracking-wider shadow-lg shadow-amber-500/20 active:scale-95 transition-all cursor-pointer"
@@ -638,16 +642,17 @@ export const AdminView: React.FC = () => {
                   <button
                     type="button"
                     onClick={() => {
-                      const randomPass = 'valentes' + Math.floor(1000 + Math.random() * 9000);
+                      const randomPass = 'Val@' + Math.random().toString(36).substring(2, 6).toUpperCase() + Math.floor(100 + Math.random() * 900);
                       setNewTeacherPassword(randomPass);
                     }}
                     className="text-[11px] text-amber-400 hover:underline"
                   >
-                    Gerar Automática
+                    Gerar Senha Única
                   </button>
                 </div>
                 <input
                   type="text"
+                  placeholder="Mínimo 6 caracteres..."
                   value={newTeacherPassword}
                   onChange={(e) => setNewTeacherPassword(e.target.value)}
                   required
@@ -1021,12 +1026,16 @@ export const AdminView: React.FC = () => {
                               alert('Selecione um aluno da lista antes de salvar.');
                               return;
                             }
-                            await linkStudentAccount(stuUser.id, selectedTargetId);
-                            const targetStudentObj = students.find((s) => s.id === selectedTargetId);
-                            setLinkingFeedback(
-                              `Conta "${stuUser.name}" vinculada com sucesso a ${targetStudentObj?.name || selectedTargetId}!`
-                            );
-                            setTimeout(() => setLinkingFeedback(null), 5000);
+                            try {
+                              await linkStudentAccount(stuUser.id, selectedTargetId);
+                              const targetStudentObj = students.find((s) => s.id === selectedTargetId);
+                              setLinkingFeedback(
+                                `Conta "${stuUser.name}" vinculada com sucesso a ${targetStudentObj?.name || selectedTargetId}!`
+                              );
+                              setTimeout(() => setLinkingFeedback(null), 5000);
+                            } catch (err: any) {
+                              alert('Erro ao vincular conta: ' + err.message);
+                            }
                           }}
                           className="px-3.5 py-2 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-black text-xs uppercase tracking-wider shadow active:scale-95 transition-all cursor-pointer"
                         >

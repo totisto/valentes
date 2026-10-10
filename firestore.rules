@@ -10,7 +10,6 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    // Validação de formato de ID
     function isValidId(id) {
       return id is string && id.size() > 0 && id.size() <= 128;
     }
@@ -50,8 +49,8 @@ service cloud.firestore {
 
     // ===============================================================
     // 1. PONTUAÇÕES (scoreEntries)
-    // - Leitura: Disponível a usuários autenticados (alunos, professores, admin).
-    // - Escrita: EXCLUSIVA para Professores e Administradores (alunos não podem alterar pontos).
+    // - Leitura: Disponível a usuários autenticados para cálculo dos rankings oficiais.
+    // - Escrita: EXCLUSIVA para Professores e Administradores (alunos não alteram pontos).
     // - Exclusão: Professores e Administrador.
     // ===============================================================
     match /scoreEntries/{entryId} {
@@ -76,30 +75,32 @@ service cloud.firestore {
     // - Usuários não autenticados NÃO podem ler perfis.
     // - Alunos autenticados podem ler SOMENTE seus próprios dados (request.auth.uid == userId).
     // - Professores e Administrador podem consultar os perfis para gestão e listagem.
-    // - Nenhuma senha pode ser gravada na coleção.
+    // - Atualização por alunos restrita à whitelist: ['name', 'avatarSeed', 'lastLogin', 'updatedAt'].
+    // - Vínculo de studentId e alteração de role: EXCLUSIVO do Administrador.
     // ===============================================================
     match /users/{userId} {
       allow read: if isSignedIn() && (request.auth.uid == userId || isTeacherOrAdmin());
 
       // Criação de perfil:
-      // - Aluno cria apenas o próprio perfil com role 'student' e sem campos de senha.
-      // - Administrador pode criar qualquer perfil (incluindo novos professores).
+      // - Aluno cria apenas o próprio perfil com role 'student' e SEM studentId (vínculo pendente), nem senhas.
+      // - Administrador pode criar qualquer perfil (incluindo novos professores com UID real).
       allow create: if isSignedIn() && (
         (
           request.auth.uid == userId &&
           request.resource.data.role == 'student' &&
-          !request.resource.data.keys().hasAny(['initialPassword', 'password'])
+          !request.resource.data.keys().hasAny(['initialPassword', 'password', 'studentId'])
         ) ||
         isAdmin()
       );
 
       // Atualização de perfil:
-      // - Usuário comum só pode atualizar seus dados pessoais, NUNCA os campos 'role', 'email' ou senhas.
-      // - Somente o Administrador Principal pode alterar roles, status e dados de professores.
+      // - Aluno pode atualizar SOMENTE campos cosméticos/pessoais (whitelist explícita).
+      // - NUNCA pode alterar 'studentId', 'role', 'email', 'active' ou senhas.
+      // - Somente o Administrador Principal pode alterar roles, studentId e permissões.
       allow update: if isSignedIn() && (
         (
           request.auth.uid == userId &&
-          !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role', 'email', 'initialPassword', 'password'])
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'avatarSeed', 'lastLogin', 'updatedAt'])
         ) ||
         isAdmin()
       );
@@ -110,23 +111,22 @@ service cloud.firestore {
 
     // ===============================================================
     // 3. ALUNOS (students)
-    // - Leitura disponível a usuários autenticados para exibição nos rankings e listas.
-    // - Professores e Admin podem gerenciar alunos; Aluno pode auto-cadastrar seu registro.
+    // - Leitura disponível a usuários autenticados para exibição nos rankings.
+    // - Criação: Professores e Administrador.
+    // - Atualização de dados cadastrais: Professores e Admin.
+    // - Vínculo do campo 'authUid': EXCLUSIVO do Administrador Principal (lucasj6k@gmail.com).
     // - Exclusão de alunos: EXCLUSIVO do Administrador.
     // ===============================================================
     match /students/{studentId} {
       allow read: if isSignedIn();
 
-      allow create: if isSignedIn() && (
-        isTeacherOrAdmin() ||
-        request.auth.uid == studentId
-      );
+      allow create: if isSignedIn() && isTeacherOrAdmin();
 
       allow update: if isSignedIn() && (
-        isTeacherOrAdmin() ||
+        isAdmin() ||
         (
-          request.auth.uid == studentId &&
-          !request.resource.data.diff(resource.data).affectedKeys().hasAny(['active'])
+          isTeacher() &&
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny(['authUid'])
         )
       );
 
@@ -135,7 +135,7 @@ service cloud.firestore {
 
     // ===============================================================
     // 4. CATEGORIAS DE AVALIAÇÃO (categories)
-    // - Leitura para compor formulários e relatórios para usuários autenticados.
+    // - Leitura para formulários e relatórios para usuários autenticados.
     // - Criação e edição: Professores e Administrador.
     // - Exclusão de categorias: EXCLUSIVO do Administrador.
     // ===============================================================

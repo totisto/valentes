@@ -3,6 +3,8 @@ import {
   getAuth,
   setPersistence,
   browserLocalPersistence,
+  browserSessionPersistence,
+  inMemoryPersistence,
   User as FirebaseUser,
   IdTokenResult
 } from 'firebase/auth';
@@ -14,14 +16,28 @@ export const db = getFirestore(app, (firebaseConfig as any).firestoreDatabaseId)
 export const auth = getAuth(app);
 export { firebaseConfig };
 
-// Shared persistence initialization promise to ensure session is preserved across browser closes
-export const authPersistencePromise: Promise<void> = setPersistence(auth, browserLocalPersistence)
-  .then(() => {
-    // Persistence set successfully
-  })
-  .catch((err) => {
-    console.warn('Firebase browserLocalPersistence notice:', err);
-  });
+export let activePersistenceType: 'local' | 'session' | 'none' = 'local';
+export let persistenceWarning: string | null = null;
+
+// Shared persistence initialization promise with explicit graceful fallback for Safari / iPhone
+export const authPersistencePromise: Promise<void> = (async () => {
+  try {
+    await setPersistence(auth, browserLocalPersistence);
+    activePersistenceType = 'local';
+  } catch (err: any) {
+    console.warn('browserLocalPersistence indisponível (Safari restrito ou modo anônimo). Tentando browserSessionPersistence:', err);
+    try {
+      await setPersistence(auth, browserSessionPersistence);
+      activePersistenceType = 'session';
+      persistenceWarning = 'Armazenamento persistente bloqueado pelo navegador. A sessão será mantida durante a navegação desta aba.';
+    } catch (sessionErr: any) {
+      console.warn('browserSessionPersistence indisponível, usando inMemoryPersistence:', sessionErr);
+      await setPersistence(auth, inMemoryPersistence);
+      activePersistenceType = 'none';
+      persistenceWarning = 'Armazenamento de sessão bloqueado. A sessão será mantida apenas enquanto a página não for recarregada.';
+    }
+  }
+})();
 
 export type UserRole = 'admin' | 'teacher' | 'student';
 

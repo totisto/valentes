@@ -107,6 +107,7 @@ export async function upsertUserProfile(profile: UserProfile): Promise<void> {
  * Creates a new teacher record by the Administrator.
  * Uses a secondary Firebase App instance so the current administrator's auth session
  * is completely preserved.
+ * NEVER creates fake IDs like prof-xxx: requires real Firebase Auth account.
  */
 export async function createTeacherUser(data: {
   name: string;
@@ -114,29 +115,63 @@ export async function createTeacherUser(data: {
   initialPassword?: string;
 }): Promise<UserProfile> {
   const emailClean = data.email.trim().toLowerCase();
-  let authUid = `prof-${Date.now().toString(36)}`;
+  const nameClean = data.name.trim();
 
-  if (data.initialPassword && data.initialPassword.length >= 6) {
-    try {
-      const secondaryName = `SecondaryAdminApp_${Date.now()}`;
-      const secondaryApp = initializeApp(firebaseConfig, secondaryName);
-      const secondaryAuth = getAuth(secondaryApp);
-      const userCredential = await createUserWithEmailAndPassword(
-        secondaryAuth,
-        emailClean,
-        data.initialPassword
-      );
-      authUid = userCredential.user.uid;
-      await signOut(secondaryAuth);
-      await deleteApp(secondaryApp);
-    } catch (authErr: any) {
-      console.warn('Teacher creation in Auth note (already exists or demo):', authErr?.message);
+  if (!emailClean) {
+    throw new Error('E-mail do professor é obrigatório.');
+  }
+
+  if (!data.initialPassword || data.initialPassword.length < 6) {
+    throw new Error('A senha inicial para o professor deve ter pelo menos 6 caracteres.');
+  }
+
+  let authUid: string;
+  const secondaryName = `SecondaryAdminApp_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+  const secondaryApp = initializeApp(firebaseConfig, secondaryName);
+  const secondaryAuth = getAuth(secondaryApp);
+
+  try {
+    const userCredential = await createUserWithEmailAndPassword(
+      secondaryAuth,
+      emailClean,
+      data.initialPassword
+    );
+    authUid = userCredential.user.uid;
+    await signOut(secondaryAuth);
+  } catch (authErr: any) {
+    if (authErr?.code === 'auth/email-already-in-use') {
+      const usersCol = collection(db, COLLECTION_NAME);
+      const snap = await getDocs(usersCol);
+      let existingProfile: UserProfile | null = null;
+      snap.forEach((d) => {
+        const p = d.data() as UserProfile;
+        if (p.email?.toLowerCase() === emailClean) {
+          existingProfile = { ...p, id: d.id };
+        }
+      });
+
+      if (existingProfile) {
+        throw new Error(
+          `O e-mail "${emailClean}" já possui cadastro no sistema como ${(existingProfile as any).role || 'usuário'}. Atualize as permissões na lista de usuários.`
+        );
+      } else {
+        throw new Error(
+          `O e-mail "${emailClean}" já existe no Firebase Authentication. Não é possível criar uma conta duplicada.`
+        );
+      }
     }
+    throw new Error(
+      authErr?.message || 'Falha ao registrar conta de autenticação para o professor.'
+    );
+  } finally {
+    try {
+      await deleteApp(secondaryApp);
+    } catch {}
   }
 
   const newProfile: UserProfile = {
     id: authUid,
-    name: data.name.trim(),
+    name: nameClean,
     email: emailClean,
     role: 'teacher',
     active: true,

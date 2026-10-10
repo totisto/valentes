@@ -113,38 +113,31 @@ export async function findStudentByAuthUid(authUid: string): Promise<Student | n
 
 /**
  * Resolves an unambiguous student match for an authenticated user:
- * 1. Checks if student has exact matching email
- * 2. Checks if exactly one active student has the identical normalized name AND is not linked to someone else
- * 3. If multiple match (ambiguous) or none match, returns null to avoid incorrect association
+ * 1. Checks if student has exact matching verified email
+ * 2. Ensures student is active and not already linked to another different authUid
+ * 3. Never auto-associates by name (ambiguous matches require admin linking)
  */
-export async function findMatchForAccount(email: string, name: string): Promise<Student | null> {
+export async function findMatchForAccount(email: string, currentAuthUid?: string): Promise<Student | null> {
   try {
+    const cleanEmail = email.trim().toLowerCase();
+    if (!cleanEmail) return null;
+
     const colRef = collection(db, COLLECTION_NAME);
     const snap = await getDocs(colRef);
     const allStudents: Student[] = [];
     snap.forEach((d) => allStudents.push({ ...(d.data() as Student), id: d.id }));
 
-    const cleanEmail = email.trim().toLowerCase();
-    const cleanName = name.trim().toLowerCase();
+    // Exact email match (unambiguous, active, and not stolen from someone else)
+    const emailMatches = allStudents.filter(
+      (s) =>
+        s.email &&
+        s.email.trim().toLowerCase() === cleanEmail &&
+        s.active !== false &&
+        (!s.authUid || s.authUid === currentAuthUid)
+    );
 
-    // 1. Exact email match (unambiguous)
-    if (cleanEmail) {
-      const emailMatches = allStudents.filter(
-        (s) => s.email && s.email.trim().toLowerCase() === cleanEmail && s.active !== false
-      );
-      if (emailMatches.length === 1) {
-        return emailMatches[0];
-      }
-    }
-
-    // 2. Exact name match: only if EXACTLY ONE active student matches and has no conflicting authUid
-    if (cleanName) {
-      const nameMatches = allStudents.filter(
-        (s) => s.name.trim().toLowerCase() === cleanName && s.active !== false
-      );
-      if (nameMatches.length === 1) {
-        return nameMatches[0];
-      }
+    if (emailMatches.length === 1) {
+      return emailMatches[0];
     }
 
     return null;

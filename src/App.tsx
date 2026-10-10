@@ -17,12 +17,13 @@ import { WeeklyRankingView } from './components/views/WeeklyRankingView';
 import { MonthlyRankingView } from './components/views/MonthlyRankingView';
 import { AnnualRankingView } from './components/views/AnnualRankingView';
 import { StudentMyScoresView } from './components/views/StudentMyScoresView';
+import { StudentPendingLinkView } from './components/views/StudentPendingLinkView';
 import { AdminView } from './components/views/AdminView';
 import { LiveAlertBanner } from './components/common/LiveAlertBanner';
 import { QuickUpdateScoreModal } from './components/modals/QuickUpdateScoreModal';
 
 function AppContent() {
-  const { role, currentUser, userProfile, isAdmin, isLoading } = useAuth();
+  const { role, currentUser, userProfile, isAdmin, isLoading, isPendingStudentLink } = useAuth();
   const {
     activeTab,
     isScoreUpdateModalOpen,
@@ -47,14 +48,26 @@ function AppContent() {
     );
   }
 
-  // 7. If no valid session exists, show LoginView
-  const isAuthenticated = !!currentUser && !!userProfile;
-  if (!isAuthenticated) {
+  // Unauthenticated user -> show LoginView
+  if (!currentUser) {
     return (
       <>
         <LiveAlertBanner />
         <LoginView />
       </>
+    );
+  }
+
+  // Authenticated student awaiting canonical student linkage -> show StudentPendingLinkView
+  if (isPendingStudentLink || (currentUser && !userProfile)) {
+    return (
+      <div className="min-h-screen bg-[#060D17] text-slate-100 flex flex-col font-['Plus_Jakarta_Sans',sans-serif]">
+        <LiveAlertBanner />
+        <Header />
+        <main className="flex-1">
+          <StudentPendingLinkView />
+        </main>
+      </div>
     );
   }
 
